@@ -4,12 +4,12 @@ use std::time::Duration;
 use anyhow::{Result, Context};
 
 const KIWOOOM_API_URL: &str = "https://api.kiwoom.com";
+const APP_KEY: &str = "HqqXP9tV01lUzqM9_D7MmzlocWRxPPGnl0652v0GEz0";
+const SECRET_KEY: &str = "dOuWW2bxiEhc6G_OngdIX1LcwU9TwwtL7fezEN2hh-4";
 
 #[derive(Debug)]
 pub struct KiwoomClient {
     client: Client,
-    app_key: String,
-    secret_key: String,
     access_token: Option<String>,
 }
 
@@ -27,45 +27,41 @@ struct TokenResponse {
     return_msg: String,
 }
 
-#[derive(Debug, Serialize)]
-struct TokenRequest {
-    #[serde(rename = "grant_type")]
-    grant_type: String,
-    #[serde(rename = "appkey")]
-    appkey: String,
-    #[serde(rename = "secretkey")]
-    secretkey: String,
-}
-
 #[derive(Debug, Deserialize)]
-struct BalanceResponse {
+struct QuoteResponse {
     #[serde(rename = "return_code")]
     return_code: i32,
     #[serde(rename = "return_msg")]
     return_msg: String,
     #[serde(default)]
-    output: Vec<BalanceOutput>,
+    output: Option<QuoteOutput>,
 }
 
 #[derive(Debug, Deserialize)]
-struct BalanceOutput {
-    #[serde(rename = "dnca_tot_amt", default)]
-    deposit_total: String,
-    #[serde(rename = "nxdy_excc_amt", default)]
-    next_day_withdrawable: String,
-    #[serde(rename = "prvs_rcdl_excc_amt", default)]
-    previous_day_withdrawable: String,
+struct QuoteOutput {
+    #[serde(rename = "stck_prpr", default)]
+    current_price: String,
+    #[serde(rename = "stck_oprc", default)]
+    open_price: String,
+    #[serde(rename = "stck_hgpr", default)]
+    high_price: String,
+    #[serde(rename = "stck_lwpr", default)]
+    low_price: String,
+    #[serde(rename = "prdy_vrss", default)]
+    change: String,
+    #[serde(rename = "prdy_vrss_sign", default)]
+    change_sign: String,
+    #[serde(rename = "acml_vol", default)]
+    volume: String,
 }
 
 impl KiwoomClient {
-    pub fn new(app_key: String, secret_key: String) -> Self {
+    pub fn new() -> Self {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("Failed to create HTTP client"),
-            app_key,
-            secret_key,
             access_token: None,
         }
     }
@@ -73,70 +69,59 @@ impl KiwoomClient {
     pub async fn authenticate(&mut self) -> Result<String> {
         let url = format!("{}/oauth2/token", KIWOOOM_API_URL);
         
-        let request = TokenRequest {
-            grant_type: "client_credentials".to_string(),
-            appkey: self.app_key.clone(),
-            secretkey: self.secret_key.clone(),
-        };
+        let request = serde_json::json!({
+            "grant_type": "client_credentials",
+            "appkey": APP_KEY,
+            "secretkey": SECRET_KEY
+        });
 
-        println!("🔑 OAuth 토큰 요청 중...");
+        println!("🔑 토큰 발급 중...");
 
         let response = self.client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
-            .await
-            .context("토큰 발급 요청 실패")?;
+            .await?;
 
-        let token: TokenResponse = response
-            .json()
-            .await
-            .context("토큰 응답 파싱 실패")?;
+        let token: TokenResponse = response.json().await?;
 
         if token.return_code != 0 {
-            anyhow::bail!("API 오류: {}", token.return_msg);
+            anyhow::bail!("인증 실패: {}", token.return_msg);
         }
 
-        println!("✓ 토큰 발급 성공! (만료: {})\n", token.expires_dt);
-
+        println!("✓ 토큰 발급 완료 (만료: {})\n", token.expires_dt);
         self.access_token = Some(token.access_token.clone());
         Ok(token.access_token)
     }
 
-    pub async fn get_account_balance(&self,
-        account_no: &str,
-    ) -> Result<BalanceResponse> {
+    pub async fn get_current_price(&self,
+        stock_code: &str,
+    ) -> Result<QuoteResponse> {
         let token = self.access_token.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("토큰이 없습니다. authenticate()를 먼저 호출하세요."))?;
+            .ok_or_else(|| anyhow::anyhow!("토큰이 없습니다"))?;
 
-        let url = format!("{}/trt/api/v1/account/balance", KIWOOOM_API_URL);
+        let url = format!("{}/trt/api/v1/quote/price", KIWOOOM_API_URL);
 
-        println!("💰 계좌 잔고 조회 중...");
-        println!("   계좌번호: {}", account_no);
+        println!("📊 현재가 조회: {}", stock_code);
 
         let response = self.client
             .get(&url)
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/json; charset=utf-8")
-            .header("appkey", &self.app_key)
+            .header("appkey", APP_KEY)
+            .header("secretkey", SECRET_KEY)
             .query(&[(
-                "CANO", account_no),
-                ("ACNT_PRDT_CD", "01"),
-                ("INQR_DVSN", "00"),
+                "FID_COND_MRKT_DIV_CODE", "J"),  // J: 코스피, K: 코스닥
+                ("FID_INPUT_ISCD", stock_code),
             ])
             .send()
-            .await
-            .context("잔고 조회 요청 실패")?;
+            .await?;
 
         println!("   HTTP Status: {}", response.status());
 
-        let balance: BalanceResponse = response
-            .json()
-            .await
-            .context("잔고 응답 파싱 실패")?;
-
-        Ok(balance)
+        let quote: QuoteResponse = response.json().await?;
+        Ok(quote)
     }
 }
 
@@ -144,41 +129,52 @@ impl KiwoomClient {
 async fn main() -> Result<()> {
     println!("=== 키움증권 API 테스트 ===\n");
 
-    let app_key = "HqqXP9tV01lUzqM9_D7MmzlocWRxPPGnl0652v0GEz0".to_string();
-    let secret_key = "dOuWW2bxiEhc6G_OngdIX1LcwU9TwwtL7fezEN2hh-4".to_string();
-    let account_no = "54690274";  // 계좌번호: 5469-0274
-
-    let mut client = KiwoomClient::new(app_key, secret_key);
+    let mut client = KiwoomClient::new();
     
     // 1. 인증
-    match client.authenticate().await {
-        Ok(_) => {},
-        Err(e) => {
-            eprintln!("✗ 인증 실패: {}", e);
-            return Ok(());
-        }
+    if let Err(e) = client.authenticate().await {
+        eprintln!("✗ 인증 실패: {}", e);
+        return Ok(());
     }
 
-    // 2. 계좌 잔고 조회
-    match client.get_account_balance(account_no).await {
-        Ok(balance) => {
-            println!("\n=== 계좌 잔고 조회 결과 ===");
-            println!("Return Code: {}", balance.return_code);
-            println!("Return Msg: {}", balance.return_msg);
+    // 2. 삼성전자 현재가 조회
+    println!("\n=== 삼성전자(005930) 현재가 조회 ===");
+    match client.get_current_price("005930").await {
+        Ok(quote) => {
+            println!("Return Code: {}", quote.return_code);
+            println!("Return Msg: {}", quote.return_msg);
             
-            if !balance.output.is_empty() {
-                for (i, item) in balance.output.iter().enumerate() {
-                    println!("\n[항목 {}]", i + 1);
-                    println!("  예수금 총금액: {}", item.deposit_total);
-                    println!("  익일정산금액: {}", item.next_day_withdrawable);
-                    println!("  가수정산금액: {}", item.previous_day_withdrawable);
-                }
-            } else {
-                println!("\n조회된 잔고 정보가 없습니다.");
+            if let Some(output) = quote.output {
+                println!("\n📈 삼성전자(005930) 시세");
+                println!("  현재가: {}원", output.current_price);
+                println!("  시가: {}원", output.open_price);
+                println!("  고가: {}원", output.high_price);
+                println!("  저가: {}원", output.low_price);
+                println!("  전일대비: {}{}원", 
+                    if output.change_sign == "1" || output.change_sign == "2" { "+" } else { "-" },
+                    output.change);
+                println!("  거래량: {}주", output.volume);
             }
         }
         Err(e) => {
-            eprintln!("\n✗ 잔고 조회 실패: {}", e);
+            eprintln!("✗ 현재가 조회 실패: {}", e);
+        }
+    }
+
+    // 3. 카카오 현재가 조회
+    println!("\n=== 카카오(035720) 현재가 조회 ===");
+    match client.get_current_price("035720").await {
+        Ok(quote) => {
+            if let Some(output) = quote.output {
+                println!("📈 카카오(035720) 시세");
+                println!("  현재가: {}원", output.current_price);
+                println!("  전일대비: {}{}원", 
+                    if output.change_sign == "1" || output.change_sign == "2" { "+" } else { "-" },
+                    output.change);
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ 현재가 조회 실패: {}", e);
         }
     }
 
