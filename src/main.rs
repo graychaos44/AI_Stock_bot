@@ -1,17 +1,13 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use anyhow::{Result, Context};
+use anyhow::Result;
 
-const KIWOOOM_API_URL: &str = "https://api.kiwoom.com";
-const APP_KEY: &str = "HqqXP9tV01lUzqM9_D7MmzlocWRxPPGnl0652v0GEz0";
-const SECRET_KEY: &str = "dOuWW2bxiEhc6G_OngdIX1LcwU9TwwtL7fezEN2hh-4";
-
-#[derive(Debug)]
-pub struct KiwoomClient {
-    client: Client,
-    access_token: Option<String>,
-}
+// 모의투자 설정
+const MOCK_API_URL: &str = "https://api.kiwoom.com";
+const APP_KEY: &str = "yRzgDtcezIFc9THMC0GHpxMti_KCCRAx1ZOIVX__8-Q";
+const APP_SECRET: &str = "QNHZaW4jK3IwuUvLldMAjus_c4l_9mcORus3-FDyyxw";
+const MOCK_ACCOUNT: &str = "81260473";
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
@@ -28,31 +24,18 @@ struct TokenResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct QuoteResponse {
+struct BalanceResponse {
     #[serde(rename = "return_code")]
     return_code: i32,
     #[serde(rename = "return_msg")]
     return_msg: String,
     #[serde(default)]
-    output: Option<QuoteOutput>,
+    output: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
-struct QuoteOutput {
-    #[serde(rename = "stck_prpr", default)]
-    current_price: String,
-    #[serde(rename = "stck_oprc", default)]
-    open_price: String,
-    #[serde(rename = "stck_hgpr", default)]
-    high_price: String,
-    #[serde(rename = "stck_lwpr", default)]
-    low_price: String,
-    #[serde(rename = "prdy_vrss", default)]
-    change: String,
-    #[serde(rename = "prdy_vrss_sign", default)]
-    change_sign: String,
-    #[serde(rename = "acml_vol", default)]
-    volume: String,
+pub struct KiwoomClient {
+    client: Client,
+    access_token: Option<String>,
 }
 
 impl KiwoomClient {
@@ -67,15 +50,15 @@ impl KiwoomClient {
     }
 
     pub async fn authenticate(&mut self) -> Result<String> {
-        let url = format!("{}/oauth2/token", KIWOOOM_API_URL);
+        let url = format!("{}/oauth2/token", MOCK_API_URL);
         
         let request = serde_json::json!({
             "grant_type": "client_credentials",
             "appkey": APP_KEY,
-            "secretkey": SECRET_KEY
+            "secretkey": APP_SECRET
         });
 
-        println!("🔑 토큰 발급 중...");
+        println!("🔑 모의투자 토큰 발급 중...");
 
         let response = self.client
             .post(&url)
@@ -90,44 +73,63 @@ impl KiwoomClient {
             anyhow::bail!("인증 실패: {}", token.return_msg);
         }
 
-        println!("✓ 토큰 발급 완료 (만료: {})\n", token.expires_dt);
+        println!("✓ 토큰 발급 완료");
+        println!("  만료: {}\n", token.expires_dt);
+        
         self.access_token = Some(token.access_token.clone());
         Ok(token.access_token)
     }
 
-    pub async fn get_current_price(&self,
-        stock_code: &str,
-    ) -> Result<QuoteResponse> {
+    pub async fn get_mock_balance(&self,
+    ) -> Result<BalanceResponse> {
         let token = self.access_token.as_ref()
             .ok_or_else(|| anyhow::anyhow!("토큰이 없습니다"))?;
 
-        let url = format!("{}/trt/api/v1/quote/price", KIWOOOM_API_URL);
+        // 모의투자 엔드포인트 테스트 (여러 경로 시도)
+        let endpoints = vec![
+            "/trt/api/v1/mock/account/balance",
+            "/trt/api/v1/account/balance",
+            "/api/v1/mock/account/balance",
+        ];
 
-        println!("📊 현재가 조회: {}", stock_code);
+        for endpoint in &endpoints {
+            let url = format!("{}{}", MOCK_API_URL, endpoint);
+            println!("💰 계좌 잔고 조회 시도: {}", endpoint);
 
-        let response = self.client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Content-Type", "application/json; charset=utf-8")
-            .header("appkey", APP_KEY)
-            .header("secretkey", SECRET_KEY)
-            .query(&[(
-                "FID_COND_MRKT_DIV_CODE", "J"),  // J: 코스피, K: 코스닥
-                ("FID_INPUT_ISCD", stock_code),
-            ])
-            .send()
-            .await?;
+            let response = self.client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Content-Type", "application/json; charset=utf-8")
+                .header("appkey", APP_KEY)
+                .query(&[(
+                    "CANO", MOCK_ACCOUNT),
+                    ("ACNT_PRDT_CD", "01"),
+                    ("INQR_DVSN", "00"),
+                ])
+                .send()
+                .await?;
 
-        println!("   HTTP Status: {}", response.status());
+            println!("   HTTP Status: {}", response.status());
 
-        let quote: QuoteResponse = response.json().await?;
-        Ok(quote)
+            let text = response.text().await?;
+            println!("   응답: {}\n", &text[..text.len().min(200)]);
+
+            // JSON 파싱 시도
+            if let Ok(balance) = serde_json::from_str::<BalanceResponse>(&text) {
+                if balance.return_code == 0 {
+                    return Ok(balance);
+                }
+            }
+        }
+
+        anyhow::bail!("모든 엔드포인트 실패")
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("=== 키움증권 API 테스트 ===\n");
+    println!("=== 키움증권 모의투자 API 테스트 ===\n");
+    println!("계좌: {}\n", MOCK_ACCOUNT);
 
     let mut client = KiwoomClient::new();
     
@@ -137,44 +139,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // 2. 삼성전자 현재가 조회
-    println!("\n=== 삼성전자(005930) 현재가 조회 ===");
-    match client.get_current_price("005930").await {
-        Ok(quote) => {
-            println!("Return Code: {}", quote.return_code);
-            println!("Return Msg: {}", quote.return_msg);
-            
-            if let Some(output) = quote.output {
-                println!("\n📈 삼성전자(005930) 시세");
-                println!("  현재가: {}원", output.current_price);
-                println!("  시가: {}원", output.open_price);
-                println!("  고가: {}원", output.high_price);
-                println!("  저가: {}원", output.low_price);
-                println!("  전일대비: {}{}원", 
-                    if output.change_sign == "1" || output.change_sign == "2" { "+" } else { "-" },
-                    output.change);
-                println!("  거래량: {}주", output.volume);
+    // 2. 모의투자 계좌 잔고 조회
+    println!("=== 모의투자 계좌 잔고 조회 ===");
+    match client.get_mock_balance().await {
+        Ok(balance) => {
+            println!("Return Code: {}", balance.return_code);
+            println!("Return Msg: {}", balance.return_msg);
+            if let Some(output) = balance.output {
+                println!("Output: {:?}", output);
             }
         }
         Err(e) => {
-            eprintln!("✗ 현재가 조회 실패: {}", e);
-        }
-    }
-
-    // 3. 카카오 현재가 조회
-    println!("\n=== 카카오(035720) 현재가 조회 ===");
-    match client.get_current_price("035720").await {
-        Ok(quote) => {
-            if let Some(output) = quote.output {
-                println!("📈 카카오(035720) 시세");
-                println!("  현재가: {}원", output.current_price);
-                println!("  전일대비: {}{}원", 
-                    if output.change_sign == "1" || output.change_sign == "2" { "+" } else { "-" },
-                    output.change);
-            }
-        }
-        Err(e) => {
-            eprintln!("✗ 현재가 조회 실패: {}", e);
+            eprintln!("✗ 잔고 조회 실패: {}", e);
         }
     }
 
